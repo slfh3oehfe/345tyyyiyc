@@ -351,8 +351,11 @@ local Config = {
         Fog            = { Enabled=false, FogStart=0, FogEnd=1000, FogColor=Color3.fromRGB(128,128,128) },
     },
     CustomSky = { Enabled=false, AllSides="", UseAllSides=true },
-    Aimbot    = { Enabled=false, AimPart="Head", AimType="Camera", TeamCheck=true, ShowFOV=false, FOV=100, FOVColor=Color3.fromRGB(255,255,255), FOVThickness=1, Smoothness=5 },
+    Aimbot    = { Enabled=false, AimPart="Head", AimType="Camera", TeamCheck=true, ShowFOV=false, FOV=100, FOVColor=Color3.fromRGB(255,255,255), FOVThickness=1, Smoothness=5, Key=nil, MouseButton=nil, KeyName="RMB (default)" },
     Menu      = { Keybind=Enum.KeyCode.LeftShift, KeybindName="LeftShift" },
+    JumpCircle= { Enabled=false },
+    ChinaHat  = { Enabled=false },
+    TargetHUD = { Enabled=true, TeamCheck=false },
 }
 
 -- ============================================================
@@ -371,6 +374,7 @@ local OriginalLighting = {}
 
 local FavoritesData    = {}
 local FeatureKeybinds  = {}
+local ToggleRegistry   = {}   -- [key] = {getState, callback, label}  — populated by every ToggleRow
 
 -- ============================================================
 -- Color palette
@@ -400,7 +404,7 @@ local C = {
 -- ScreenGui
 -- ============================================================
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "NovaRecode_"..tostring(math.random(1000,9999))
+ScreenGui.Name = "NovaV4_"..tostring(math.random(1000,9999))
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.DisplayOrder = 999
@@ -522,9 +526,232 @@ local function UpdateAimbot()
     local t=GetClosestPlayer(); if t then AimAt(t) end
 end
 
+-- GetHRP helper (used by jump circle, china hat, target HUD)
+local function GetHRP(p)
+    local c = p and p.Character
+    return c and (c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Torso"))
+end
+
+
 -- ============================================================
--- ESP
+-- JUMP CIRCLE  (ground indicator under local player)
 -- ============================================================
+local JumpCircle = nil
+local function InitJumpCircle()
+    if not Drawing then return end
+    JumpCircle = Drawing.new("Circle")
+    JumpCircle.Thickness  = 1.5
+    JumpCircle.Color      = Color3.fromRGB(91,155,255)
+    JumpCircle.Filled     = false
+    JumpCircle.Visible    = false
+    JumpCircle.Radius     = 1
+    JumpCircle.Position   = Vector2.new(0,0)
+end
+
+local function UpdateJumpCircle()
+    if not JumpCircle or not Config.JumpCircle or not Config.JumpCircle.Enabled then
+        if JumpCircle then JumpCircle.Visible=false end; return
+    end
+    local char=LocalPlayer.Character
+    local hrp=char and char:FindFirstChild("HumanoidRootPart")
+    local hum=char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then JumpCircle.Visible=false; return end
+
+    -- Cast ray straight down to find ground distance
+    local origin=hrp.Position
+    local ray=workspace:Raycast(origin, Vector3.new(0,-50,0), RaycastParams.new())
+    local groundY = ray and ray.Position.Y or (origin.Y - 50)
+    local dist=origin.Y - groundY
+
+    -- Project a world-space circle at ground position onto screen
+    local groundPos=Vector3.new(origin.X, groundY+0.1, origin.Z)
+    local sp,onScreen,depth=Camera:WorldToViewportPoint(groundPos)
+    if not onScreen or depth<=0 then JumpCircle.Visible=false; return end
+
+    -- Radius shrinks as player gets closer to ground
+    local maxDist=30
+    local t2=math.clamp(dist/maxDist,0,1)
+    local screenRadius = math.clamp(80*(1-t2*0.6)/depth*40, 8, 120)
+    local alpha = math.clamp(1 - dist/maxDist, 0.1, 1)
+
+    JumpCircle.Position = Vector2.new(sp.X, sp.Y)
+    JumpCircle.Radius   = screenRadius
+    JumpCircle.Color    = Color3.fromRGB(
+        math.floor(91  + (255-91) *(1-alpha)),
+        math.floor(155 + (80-155)*(1-alpha)),
+        math.floor(255 * alpha)
+    )
+    JumpCircle.Visible  = true
+end
+
+-- ============================================================
+-- CHINA HAT  (cone above LOCAL player only, no ESP required)
+-- ============================================================
+local ChinaHatLines = {}
+
+local function InitChinaHat()
+    if not Drawing then return end
+    for i=1,3 do
+        local ln=Drawing.new("Line")
+        ln.Visible=false; ln.Thickness=1.5
+        ln.Color=Color3.fromRGB(91,155,255)
+        ChinaHatLines[i]=ln
+    end
+end
+
+local function UpdateLocalChinaHat()
+    local function hide()
+        for _,l in ipairs(ChinaHatLines) do if l then l.Visible=false end end
+    end
+    if not Config.ChinaHat or not Config.ChinaHat.Enabled or #ChinaHatLines==0 then hide(); return end
+
+    local char=LocalPlayer.Character
+    local head=char and char:FindFirstChild("Head")
+    if not head then hide(); return end
+
+    -- Project head top to screen
+    local headTop=Vector3.new(head.Position.X, head.Position.Y+head.Size.Y/2+0.1, head.Position.Z)
+    local sp,onScreen,depth=Camera:WorldToViewportPoint(headTop)
+    if not onScreen or depth<=0 then hide(); return end
+
+    -- Scale hat with distance
+    local scale = math.clamp(600/depth, 10, 80)
+    local tx,ty  = sp.X, sp.Y
+    local hw     = scale * 1.1
+    local ht     = scale * 0.9
+    local col    = Color3.fromRGB(91,155,255)
+    local apex   = Vector2.new(tx,      ty - ht)
+    local left   = Vector2.new(tx - hw, ty)
+    local right  = Vector2.new(tx + hw, ty)
+
+    ChinaHatLines[1].From=apex;  ChinaHatLines[1].To=left;  ChinaHatLines[1].Color=col; ChinaHatLines[1].Visible=true
+    ChinaHatLines[2].From=apex;  ChinaHatLines[2].To=right; ChinaHatLines[2].Color=col; ChinaHatLines[2].Visible=true
+    ChinaHatLines[3].From=left;  ChinaHatLines[3].To=right; ChinaHatLines[3].Color=col; ChinaHatLines[3].Visible=true
+end
+
+-- ============================================================
+-- TARGET HUD  (popup card when aiming at a player)
+-- ============================================================
+local TargetHUD_Frame    = nil
+local TargetHUD_Avatar   = nil
+local TargetHUD_Name     = nil
+local TargetHUD_HPBar    = nil
+local TargetHUD_HPFill   = nil
+local TargetHUD_HPLbl    = nil
+local TargetHUD_Dist     = nil
+local _lastTargetPlayer  = nil
+local _targetHUDVisible  = false
+
+local function InitTargetHUD()
+    local frame = New("Frame",{
+        Name="TargetHUD",
+        Size=UDim2.new(0,220,0,64),
+        Position=UDim2.new(1,-230,0.5,-32),
+        BackgroundColor3=C.Panel,
+        BackgroundTransparency=0.08,
+        BorderSizePixel=0,
+        ZIndex=30,
+        Visible=false,
+        Parent=ScreenGui,
+    })
+    Corner(10,frame)
+    Stroke(C.Accent,1,frame)
+
+    -- top gradient accent bar
+    local topBar=New("Frame",{Size=UDim2.new(1,0,0,3),BackgroundColor3=C.Accent,BorderSizePixel=0,ZIndex=31,Parent=frame}); Corner(10,topBar)
+    local grad=Instance.new("UIGradient"); grad.Color=ColorSequence.new(C.Accent,Color3.fromRGB(170,110,255)); grad.Rotation=0; grad.Parent=topBar
+    New("Frame",{Size=UDim2.new(1,0,0.5,0),Position=UDim2.new(0,0,0.5,0),BackgroundColor3=C.Accent,BorderSizePixel=0,ZIndex=31,Parent=topBar})
+
+    -- avatar circle
+    local avFrame=New("Frame",{Size=UDim2.new(0,40,0,40),Position=UDim2.new(0,8,0.5,-20),BackgroundColor3=C.Sidebar,ZIndex=31,Parent=frame}); Corner(20,avFrame)
+    TargetHUD_Avatar=New("ImageLabel",{Size=UDim2.new(1,-2,1,-2),Position=UDim2.new(0,1,0,1),BackgroundTransparency=1,Image="",ZIndex=32,Parent=avFrame}); Corner(19,TargetHUD_Avatar)
+
+    -- name
+    TargetHUD_Name=New("TextLabel",{Size=UDim2.new(1,-110,0,18),Position=UDim2.new(0,56,0,8),BackgroundTransparency=1,Text="",TextColor3=C.TextPri,TextSize=13,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=31,Parent=frame})
+
+    -- distance
+    TargetHUD_Dist=New("TextLabel",{Size=UDim2.new(0,50,0,14),Position=UDim2.new(1,-56,0,8),BackgroundTransparency=1,Text="",TextColor3=C.TextDim,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Right,ZIndex=31,Parent=frame})
+
+    -- health bar track
+    local hpTrack=New("Frame",{Size=UDim2.new(1,-60,0,5),Position=UDim2.new(0,56,0,32),BackgroundColor3=C.Divider,BorderSizePixel=0,ZIndex=31,Parent=frame}); Corner(3,hpTrack)
+    TargetHUD_HPFill=New("Frame",{Size=UDim2.new(1,0,1,0),BackgroundColor3=C.Green,BorderSizePixel=0,ZIndex=32,Parent=hpTrack}); Corner(3,TargetHUD_HPFill)
+    TargetHUD_HPBar=hpTrack
+
+    -- hp label
+    TargetHUD_HPLbl=New("TextLabel",{Size=UDim2.new(0,50,0,14),Position=UDim2.new(0,56,0,42),BackgroundTransparency=1,Text="",TextColor3=C.TextSec,TextSize=10,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=31,Parent=frame})
+
+    TargetHUD_Frame=frame
+end
+
+local _avatarCache = {}
+local function ShowTargetHUD(player)
+    if not TargetHUD_Frame then return end
+    local char=player.Character; if not char then return end
+    local hum=char:FindFirstChildOfClass("Humanoid"); if not hum then return end
+    local hrp=GetHRP(player)
+
+    -- Load avatar async (cached)
+    if _lastTargetPlayer ~= player then
+        _lastTargetPlayer = player
+        TargetHUD_Avatar.Image = _avatarCache[player.UserId] or ""
+        if not _avatarCache[player.UserId] then
+            task.spawn(function()
+                local ok,img=pcall(function() return Players:GetUserThumbnailAsync(player.UserId,Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size100x100) end)
+                if ok then _avatarCache[player.UserId]=img; if TargetHUD_Avatar then TargetHUD_Avatar.Image=img end end
+            end)
+        end
+    end
+
+    TargetHUD_Name.Text = player.DisplayName
+
+    local hp=hum.Health; local maxHp=hum.MaxHealth
+    local pct=math.clamp(maxHp>0 and hp/maxHp or 0, 0, 1)
+    TweenService:Create(TargetHUD_HPFill,TweenInfo.new(0.12),{Size=UDim2.new(pct,0,1,0)}):Play()
+    TargetHUD_HPFill.BackgroundColor3 = pct>0.6 and C.Green or pct>0.3 and C.Yellow or C.Red
+    TargetHUD_HPLbl.Text = math.floor(hp).." / "..math.floor(maxHp).." HP"
+
+    if hrp then
+        local d=math.floor((Camera.CFrame.Position-hrp.Position).Magnitude)
+        TargetHUD_Dist.Text = d.."m"
+    end
+
+    if not _targetHUDVisible then
+        _targetHUDVisible=true
+        TargetHUD_Frame.Visible=true
+        TargetHUD_Frame.Size=UDim2.new(0,0,0,0)
+        TweenService:Create(TargetHUD_Frame,TweenInfo.new(0.2,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,220,0,64)}):Play()
+    end
+end
+
+-- Closest player in FOV for Target HUD (works even without IsAiming)
+local function GetClosestInFOV()
+    local closest, closestDist = nil, Config.Aimbot.FOV
+    local mousePos = UserInputService:GetMouseLocation()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if Config.Aimbot.TeamCheck and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then continue end
+        local char = player.Character; if not char then continue end
+        local hum = char:FindFirstChildOfClass("Humanoid"); if not hum or hum.Health <= 0 then continue end
+        local part = char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart")
+        if not part then continue end
+        local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then continue end
+        local dist = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+        if dist < closestDist then closestDist = dist; closest = player end
+    end
+    return closest
+end
+
+local function HideTargetHUD()
+    if not TargetHUD_Frame or not _targetHUDVisible then return end
+    _targetHUDVisible=false
+    _lastTargetPlayer=nil
+    TweenService:Create(TargetHUD_Frame,TweenInfo.new(0.15,Enum.EasingStyle.Quart,Enum.EasingDirection.In),{Size=UDim2.new(0,0,0,0)}):Play()
+    task.delay(0.16,function() if TargetHUD_Frame then TargetHUD_Frame.Visible=false end end)
+end
+
+
+
 local Stats=game:GetService("Stats")
 local function GetTeamColor(player) return player.Team and player.Team.TeamColor.Color or Color3.fromRGB(255,255,255) end
 local function IsTeammate(player)
@@ -589,7 +816,9 @@ local function UpdateESP()
             local cl=bw*0.25
             local lines={{tl,Vector2.new(tl.X+cl,tl.Y)},{tl,Vector2.new(tl.X,tl.Y+cl)},{tr,Vector2.new(tr.X-cl,tr.Y)},{tr,Vector2.new(tr.X,tr.Y+cl)},{bl,Vector2.new(bl.X+cl,bl.Y)},{bl,Vector2.new(bl.X,bl.Y-cl)},{br,Vector2.new(br.X-cl,br.Y)},{br,Vector2.new(br.X,br.Y-cl)}}
             for i,l in ipairs(lines) do d.Drawings["Box"..i].From=l[1]; d.Drawings["Box"..i].To=l[2]; d.Drawings["Box"..i].Color=ec; d.Drawings["Box"..i].Thickness=Config.ESP.BoxThickness; d.Drawings["Box"..i].Visible=true end
-        else for i=1,8 do d.Drawings["Box"..i].Visible=false end end
+        else
+            for i=1,8 do d.Drawings["Box"..i].Visible=false end
+        end
         if Config.ESP.Enabled and Config.ESP.ShowName then
             d.Drawings.Name.Text=player.Name; d.Drawings.Name.Position=Vector2.new(sp.X,sp.Y-bh/2-18)
             d.Drawings.Name.Color=Config.ESP.NameColor; d.Drawings.Name.Visible=true
@@ -780,7 +1009,7 @@ local function UpdateCameraFOV() Camera.FieldOfView=Config.CameraFOV.Enabled and
 local function UpdateShaders()
     local function Apply(nm,cls,props)
         if Config.Shaders[nm].Enabled then
-            if not ShaderEffects[nm] then ShaderEffects[nm]=Instance.new(cls); ShaderEffects[nm].Name="NovaRecode_"..nm; ShaderEffects[nm].Parent=Lighting end
+            if not ShaderEffects[nm] then ShaderEffects[nm]=Instance.new(cls); ShaderEffects[nm].Name="NovaV4_"..nm; ShaderEffects[nm].Parent=Lighting end
             for k,v in pairs(props) do pcall(function() ShaderEffects[nm][k]=v end) end
             if ShaderEffects[nm].Enabled~=nil then ShaderEffects[nm].Enabled=true end
         elseif ShaderEffects[nm] then
@@ -793,7 +1022,7 @@ local function UpdateShaders()
     Apply("SunRays","SunRaysEffect",{Intensity=Config.Shaders.SunRays.Intensity,Spread=Config.Shaders.SunRays.Spread})
     Apply("DepthOfField","DepthOfFieldEffect",{FarIntensity=Config.Shaders.DepthOfField.FarIntensity,FocusDistance=Config.Shaders.DepthOfField.FocusDistance,InFocusRadius=Config.Shaders.DepthOfField.InFocusRadius,NearIntensity=Config.Shaders.DepthOfField.NearIntensity})
     if Config.Shaders.Atmosphere.Enabled then
-        if not ShaderEffects.Atmosphere then ShaderEffects.Atmosphere=Instance.new("Atmosphere"); ShaderEffects.Atmosphere.Name="NovaRecode_Atmosphere"; ShaderEffects.Atmosphere.Parent=Lighting end
+        if not ShaderEffects.Atmosphere then ShaderEffects.Atmosphere=Instance.new("Atmosphere"); ShaderEffects.Atmosphere.Name="NovaV4_Atmosphere"; ShaderEffects.Atmosphere.Parent=Lighting end
         local a=Config.Shaders.Atmosphere; ShaderEffects.Atmosphere.Density=a.Density; ShaderEffects.Atmosphere.Offset=a.Offset; ShaderEffects.Atmosphere.Color=a.Color; ShaderEffects.Atmosphere.Decay=a.Decay; ShaderEffects.Atmosphere.Glare=a.Glare; ShaderEffects.Atmosphere.Haze=a.Haze
     elseif ShaderEffects.Atmosphere then pcall(function() ShaderEffects.Atmosphere:Destroy() end) ShaderEffects.Atmosphere=nil end
     if Config.Shaders.Fullbright.Enabled then
@@ -819,7 +1048,7 @@ local function UpdateCustomSky()
         if CustomSkyInstance and OriginalSkyProperties then for p,v in pairs(OriginalSkyProperties) do pcall(function() CustomSkyInstance[p]=v end) end end; return
     end
     local sky=Lighting:FindFirstChildOfClass("Sky")
-    if not sky then sky=Instance.new("Sky"); sky.Name="NovaRecode_Sky"; sky.Parent=Lighting end
+    if not sky then sky=Instance.new("Sky"); sky.Name="NovaV4_Sky"; sky.Parent=Lighting end
     CustomSkyInstance=sky
     if not OriginalSkyProperties then OriginalSkyProperties={}; pcall(function() OriginalSkyProperties.SkyboxBk=sky.SkyboxBk; OriginalSkyProperties.SkyboxDn=sky.SkyboxDn; OriginalSkyProperties.SkyboxFt=sky.SkyboxFt; OriginalSkyProperties.SkyboxLf=sky.SkyboxLf; OriginalSkyProperties.SkyboxRt=sky.SkyboxRt; OriginalSkyProperties.SkyboxUp=sky.SkyboxUp; OriginalSkyProperties.CelestialBodiesShown=sky.CelestialBodiesShown end) end
     local id=Config.CustomSky.UseAllSides and FormatAssetId(Config.CustomSky.AllSides) or ""; if id=="" then return end
@@ -853,7 +1082,7 @@ local CurrentTab="Combat"
 
 local function CreateMainMenu()
     local Root=New("Frame",{
-        Name="NovaRecodeRoot",Size=UDim2.new(0,580,0,380),
+        Name="NovaV4Root",Size=UDim2.new(0,580,0,380),
         Position=UDim2.new(0.5,0,0.5,0),AnchorPoint=Vector2.new(0.5,0.5),
         BackgroundColor3=C.BG,BorderSizePixel=0,Visible=false,
         ZIndex=20,Active=true,Parent=ScreenGui
@@ -864,14 +1093,11 @@ local function CreateMainMenu()
     New("Frame",{Size=UDim2.new(0,10,1,0),Position=UDim2.new(1,-10,0,0),BackgroundColor3=C.Sidebar,BorderSizePixel=0,Parent=Sidebar})
     local LogoArea=New("Frame",{Size=UDim2.new(1,0,0,52),BackgroundTransparency=1,Parent=Sidebar})
     New("TextLabel",{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="nova",TextColor3=Color3.fromRGB(255,255,255),TextSize=22,Font=Enum.Font.GothamBold,Parent=LogoArea})
-    New("TextLabel",{Size=UDim2.new(1,0,0,14),Position=UDim2.new(0,0,1,-16),BackgroundTransparency=1,Text="Recode",TextColor3=C.Accent,TextSize=11,Font=Enum.Font.GothamBold,Parent=LogoArea})
+    New("TextLabel",{Size=UDim2.new(1,0,0,14),Position=UDim2.new(0,0,1,-16),BackgroundTransparency=1,Text="V4",TextColor3=C.Accent,TextSize=11,Font=Enum.Font.GothamBold,Parent=LogoArea})
     New("Frame",{Size=UDim2.new(1,-20,0,1),Position=UDim2.new(0,10,0,52),BackgroundColor3=C.Divider,BorderSizePixel=0,Parent=Sidebar})
     local NavList=New("Frame",{Size=UDim2.new(1,0,1,-90),Position=UDim2.new(0,0,0,58),BackgroundTransparency=1,Parent=Sidebar})
     New("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=NavList})
     New("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),Parent=NavList})
-    local BottomRow=New("Frame",{Size=UDim2.new(1,0,0,40),Position=UDim2.new(0,0,1,-44),BackgroundTransparency=1,Parent=Sidebar})
-    New("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,SortOrder=Enum.SortOrder.LayoutOrder,HorizontalAlignment=Enum.HorizontalAlignment.Center,VerticalAlignment=Enum.VerticalAlignment.Center,Padding=UDim.new(0,6),Parent=BottomRow})
-
     -- ── Animate Root out (shrink + fade) then run callback ──────
     local _animating = false
     local function AnimateClose(callback)
@@ -900,7 +1126,7 @@ local function CreateMainMenu()
         "See you on the other side.",
         "Stay sharp out there.",
         "Catch you next time.",
-        "Nova Recode signing off.",
+        "Nova V4 signing off.",
         "Good luck, soldier.",
         "Until next time.",
         "Gone but not forgotten.",
@@ -919,7 +1145,7 @@ local function CreateMainMenu()
         -- accent stripe
         local gs=New("Frame",{Size=UDim2.new(0,3,0.7,0),Position=UDim2.new(0,0,0.15,0),BackgroundColor3=C.Accent,BorderSizePixel=0,ZIndex=101,Parent=gb}); Corner(2,gs)
         New("TextLabel",{Size=UDim2.new(1,-14,0,20),Position=UDim2.new(0,12,0,5),BackgroundTransparency=1,
-            Text="Nova Recode — Destroyed",TextColor3=C.TextPri,TextSize=13,Font=Enum.Font.GothamBold,
+            Text="Nova V4 — Destroyed",TextColor3=C.TextPri,TextSize=13,Font=Enum.Font.GothamBold,
             TextXAlignment=Enum.TextXAlignment.Left,ZIndex=101,Parent=gb})
         New("TextLabel",{Size=UDim2.new(1,-14,0,16),Position=UDim2.new(0,12,0,28),BackgroundTransparency=1,
             Text=msg,TextColor3=C.TextSec,TextSize=11,Font=Enum.Font.Gotham,
@@ -968,7 +1194,7 @@ local function CreateMainMenu()
         local dg=Instance.new("UIGradient"); dg.Color=ColorSequence.new(C.Red,Color3.fromRGB(180,40,40)); dg.Rotation=0; dg.Parent=dTop
 
         New("TextLabel",{Size=UDim2.new(1,-24,0,28),Position=UDim2.new(0,12,0,12),BackgroundTransparency=1,
-            Text="Destroy Nova Recode?",TextColor3=C.TextPri,TextSize=15,Font=Enum.Font.GothamBold,
+            Text="Destroy Nova V4?",TextColor3=C.TextPri,TextSize=15,Font=Enum.Font.GothamBold,
             TextXAlignment=Enum.TextXAlignment.Left,ZIndex=92,Parent=dialog})
         New("TextLabel",{Size=UDim2.new(1,-24,0,34),Position=UDim2.new(0,12,0,44),BackgroundTransparency=1,
             Text="This will permanently remove the script.\nAll features will stop working.",
@@ -1014,29 +1240,25 @@ local function CreateMainMenu()
         end)
     end
 
-    -- ── Build the [X] and [-] buttons ────────────────────────────
+    local BottomRow=New("Frame",{Size=UDim2.new(1,0,0,40),Position=UDim2.new(0,0,1,-44),BackgroundTransparency=1,Parent=Sidebar})
+    New("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,SortOrder=Enum.SortOrder.LayoutOrder,HorizontalAlignment=Enum.HorizontalAlignment.Center,VerticalAlignment=Enum.VerticalAlignment.Center,Padding=UDim.new(0,6),Parent=BottomRow})
     for _,ic in ipairs({"[X]","[-]"}) do
         local b=New("TextButton",{Size=UDim2.new(0,28,0,28),BackgroundColor3=C.Panel,Text=ic,TextColor3=C.TextSec,TextSize=11,Font=Enum.Font.GothamBold,Parent=BottomRow}); Corner(6,b)
         if ic=="[X]" then
             b.MouseEnter:Connect(function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=Color3.fromRGB(60,20,20),TextColor3=C.Red}):Play() end)
             b.MouseLeave:Connect(function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=C.Panel,TextColor3=C.TextSec}):Play() end)
-            b.MouseButton1Click:Connect(function()
-                ShowConfirmDialog(DestroyScript)
-            end)
+            b.MouseButton1Click:Connect(function() ShowConfirmDialog(DestroyScript) end)
         else
             b.MouseEnter:Connect(function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=C.RowHover}):Play() end)
             b.MouseLeave:Connect(function() TweenService:Create(b,TweenInfo.new(0.1),{BackgroundColor3=C.Panel}):Play() end)
             b.MouseButton1Click:Connect(function()
-                AnimateClose(function()
-                    MenuOpen=false
-                    UnlockMouseForMenu()
-                end)
+                AnimateClose(function() MenuOpen=false; UnlockMouseForMenu() end)
             end)
         end
     end
     local Content=New("Frame",{Name="Content",Size=UDim2.new(1,-148,1,-8),Position=UDim2.new(0,144,0,4),BackgroundTransparency=1,Parent=Root})
     local TabPages,TabButtons={},{}
-    local tabs={{name="Favorites",label="Favorites"},{name="Combat",label="Combat"},{name="Visual",label="Visual"},{name="Utility",label="Utility"},{name="Config",label="Config"},{name="Settings",label="Settings"}}
+    local tabs={{name="Favorites",label="Favorites"},{name="Combat",label="Combat"},{name="Visual",label="Visual"},{name="Utility",label="Utility"},{name="Exploits",label="Exploits"},{name="Config",label="Config"},{name="Settings",label="Settings"}}
     local function MakePage(name)
         local p=New("ScrollingFrame",{Name=name.."Page",Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,ScrollBarThickness=3,ScrollBarImageColor3=C.AccentDim,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false,Parent=Content})
         New("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,0),Parent=p})
@@ -1106,19 +1328,34 @@ local function CreateMainMenu()
         local inner=New("Frame",{Size=UDim2.new(1,0,0,50),BackgroundTransparency=1,Parent=panel})
         local currentBind=FeatureKeybinds[featureKey]; local bindText=currentBind and currentBind.Name or "None"
         New("TextLabel",{Size=UDim2.new(1,-120,1,0),Position=UDim2.new(0,12,0,0),BackgroundTransparency=1,Text="Keybind for  "..label,TextColor3=C.TextSec,TextSize=12,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=inner})
-        local bindBtn=New("TextButton",{Size=UDim2.new(0,100,0,28),Position=UDim2.new(1,-108,0.5,-14),BackgroundColor3=C.Row,Text=bindText,TextColor3=C.Accent,TextSize=12,Font=Enum.Font.GothamBold,Parent=inner}); Corner(5,bindBtn); Stroke(C.AccentDim,1,bindBtn)
+        local bindBtn=New("TextButton",{Size=UDim2.new(0,100,0,28),Position=UDim2.new(1,-108,0.5,-14),BackgroundColor3=C.Row,Text=bindText,TextColor3=Color3.fromRGB(255,255,255),TextSize=12,Font=Enum.Font.GothamBold,Parent=inner}); Corner(5,bindBtn); Stroke(C.AccentDim,1,bindBtn)
         local clearBtn=New("TextButton",{Size=UDim2.new(0,0,0,28),Position=UDim2.new(1,-108,0.5,-14),AutomaticSize=Enum.AutomaticSize.X,BackgroundColor3=C.Row,Text="  Clear  ",TextColor3=C.Red,TextSize=11,Font=Enum.Font.GothamBold,Visible=false,Parent=inner}); Corner(5,clearBtn)
         local listening=false
         bindBtn.MouseButton1Click:Connect(function()
-            if listening then return end; listening=true; bindBtn.Text="Press a key..."; bindBtn.TextColor3=C.Yellow
-            local conn2; conn2=UserInputService.InputBegan:Connect(function(input,gp)
-                if input.UserInputType==Enum.UserInputType.Keyboard then
-                    local blocked={Enum.KeyCode.Escape,Enum.KeyCode.Return,Enum.KeyCode.Tab}
-                    local ok2=true; for _,k in ipairs(blocked) do if input.KeyCode==k then ok2=false break end end
-                    if ok2 then FeatureKeybinds[featureKey]=input.KeyCode; bindBtn.Text=input.KeyCode.Name; bindBtn.TextColor3=C.Accent; clearBtn.Visible=true; ShowToast("Keybind Set",label.." bound to "..input.KeyCode.Name,"success")
-                    else bindBtn.Text=FeatureKeybinds[featureKey] and FeatureKeybinds[featureKey].Name or "None"; bindBtn.TextColor3=C.Accent end
-                    listening=false; conn2:Disconnect()
+            if listening then return end
+            listening=true
+            bindBtn.Text="Press a key..."
+            bindBtn.TextColor3=Color3.fromRGB(255,255,255)
+            local conn2; conn2=UserInputService.InputBegan:Connect(function(input)
+                -- ignore clicks that aren't keyboard
+                if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+                local kc = input.KeyCode
+                -- Escape cancels without binding
+                if kc == Enum.KeyCode.Escape then
+                    bindBtn.Text = FeatureKeybinds[featureKey] and FeatureKeybinds[featureKey].Name or "None"
+                    bindBtn.TextColor3 = Color3.fromRGB(255,255,255)
+                    listening=false; conn2:Disconnect(); return
                 end
+                -- Tab/Return also cancel
+                if kc==Enum.KeyCode.Return or kc==Enum.KeyCode.Tab then
+                    listening=false; conn2:Disconnect(); return
+                end
+                FeatureKeybinds[featureKey] = kc
+                bindBtn.Text = kc.Name
+                bindBtn.TextColor3 = Color3.fromRGB(255,255,255)
+                clearBtn.Visible = true
+                ShowToast("Keybind Set", label.." → "..kc.Name, "success")
+                listening=false; conn2:Disconnect()
             end)
         end)
         clearBtn.MouseButton1Click:Connect(function()
@@ -1130,6 +1367,8 @@ local function CreateMainMenu()
 
     local function ToggleRow(parent,label,tag,getState,order,callback,featureKey)
         local key=featureKey or (label:gsub("%s","_"))
+        -- Register so keybinds work without needing to pin to Favorites
+        ToggleRegistry[key]={getState=getState,callback=callback,label=label}
         local row=New("Frame",{Name=label.."Row",Size=UDim2.new(1,0,0,42),BackgroundColor3=C.Row,LayoutOrder=order,Parent=parent})
         row.MouseEnter:Connect(function() TweenService:Create(row,TweenInfo.new(0.12),{BackgroundColor3=C.RowHover}):Play() end)
         row.MouseLeave:Connect(function() TweenService:Create(row,TweenInfo.new(0.12),{BackgroundColor3=C.Row}):Play() end)
@@ -1266,10 +1505,106 @@ local function CreateMainMenu()
     ord=ord+1; DropRow(com,"Aim Type",{"Camera","Mouse"},Config.Aimbot.AimType,ord,function(v) Config.Aimbot.AimType=v end)
     ord=ord+1; ToggleRow(com,"Team Check","",function() return Config.Aimbot.TeamCheck end,ord,function(s) Config.Aimbot.TeamCheck=s end,"AimbotTeamCheck")
     ord=ord+1; SliderRow(com,"Smoothness",1,20,Config.Aimbot.Smoothness,ord,function(v) Config.Aimbot.Smoothness=v end)
+
+    -- Aimbot keybind row
+    ord=ord+1
+    local aimKeyRow=New("Frame",{Size=UDim2.new(1,0,0,42),BackgroundColor3=C.Row,LayoutOrder=ord,Parent=com})
+    aimKeyRow.MouseEnter:Connect(function() TweenService:Create(aimKeyRow,TweenInfo.new(0.1),{BackgroundColor3=C.RowHover}):Play() end)
+    aimKeyRow.MouseLeave:Connect(function() TweenService:Create(aimKeyRow,TweenInfo.new(0.1),{BackgroundColor3=C.Row}):Play() end)
+    New("TextLabel",{Size=UDim2.new(1,-160,1,0),Position=UDim2.new(0,12,0,0),BackgroundTransparency=1,
+        Text="Aim Key",TextColor3=C.TextPri,TextSize=13,Font=Enum.Font.Gotham,
+        TextXAlignment=Enum.TextXAlignment.Left,Parent=aimKeyRow})
+    local aimKeyBtn=New("TextButton",{Size=UDim2.new(0,130,0,28),Position=UDim2.new(1,-138,0.5,-14),
+        BackgroundColor3=C.Panel,Text=Config.Aimbot.KeyName,TextColor3=Color3.fromRGB(255,255,255),
+        TextSize=11,Font=Enum.Font.GothamBold,BorderSizePixel=0,Parent=aimKeyRow})
+    Corner(6,aimKeyBtn); Stroke(C.AccentDim,1,aimKeyBtn)
+    local _aimKeyListening=false
+    aimKeyBtn.MouseButton1Click:Connect(function()
+        if _aimKeyListening then return end
+        _aimKeyListening=true
+        aimKeyBtn.Text="Press key / MB2/4/5..."
+        aimKeyBtn.TextColor3=Color3.fromRGB(255,255,255)
+        local c2; c2=UserInputService.InputBegan:Connect(function(input)
+            -- Escape cancels
+            if input.KeyCode==Enum.KeyCode.Escape then
+                aimKeyBtn.Text=Config.Aimbot.KeyName
+                aimKeyBtn.TextColor3=Color3.fromRGB(255,255,255)
+                _aimKeyListening=false; c2:Disconnect(); return
+            end
+            local name, keyVal, mouseBtn = nil, nil, nil
+            if input.UserInputType==Enum.UserInputType.MouseButton2 then
+                name="RMB (default)"; mouseBtn="MB2"
+            elseif input.UserInputType==Enum.UserInputType.MouseButton3 then
+                name="MB3"; mouseBtn="MB3"
+            elseif input.UserInputType==Enum.UserInputType.MouseButton4 then
+                name="MB4"; mouseBtn="MB4"
+            elseif input.UserInputType==Enum.UserInputType.MouseButton5 then
+                name="MB5"; mouseBtn="MB5"
+            elseif input.UserInputType==Enum.UserInputType.Keyboard then
+                local kc=input.KeyCode
+                if kc==Enum.KeyCode.Return or kc==Enum.KeyCode.Tab then
+                    _aimKeyListening=false; c2:Disconnect(); return
+                end
+                name=kc.Name; keyVal=kc
+            end
+            if not name then return end
+            -- MB2 = reset to default
+            if mouseBtn=="MB2" then
+                Config.Aimbot.Key=nil; Config.Aimbot.MouseButton=nil
+                Config.Aimbot.KeyName="RMB (default)"
+                ShowToast("Aim Key","Reset to RMB","info")
+            elseif mouseBtn then
+                Config.Aimbot.Key=nil; Config.Aimbot.MouseButton=input.UserInputType
+                Config.Aimbot.KeyName=name
+                ShowToast("Aim Key","Set to "..name,"success")
+            else
+                Config.Aimbot.Key=keyVal; Config.Aimbot.MouseButton=nil
+                Config.Aimbot.KeyName=name
+                ShowToast("Aim Key","Set to "..name,"success")
+            end
+            aimKeyBtn.Text=Config.Aimbot.KeyName
+            aimKeyBtn.TextColor3=Color3.fromRGB(255,255,255)
+            _aimKeyListening=false; c2:Disconnect()
+        end)
+    end)
     ord=ord+1; Section(com,"FOV Circle",ord)
     ord=ord+1; ToggleRow(com,"Show FOV","",function() return Config.Aimbot.ShowFOV end,ord,function(s) Config.Aimbot.ShowFOV=s end,"ShowFOV")
     ord=ord+1; SliderRow(com,"FOV Size",10,500,Config.Aimbot.FOV,ord,function(v) Config.Aimbot.FOV=v end)
     ord=ord+1; SliderRow(com,"FOV Thickness",1,5,Config.Aimbot.FOVThickness,ord,function(v) Config.Aimbot.FOVThickness=v end)
+
+    ord=ord+1; Section(com,"Triggerbot",ord)
+    local _triggerOn    = false
+    local _triggerConn  = nil
+    local _triggerDelay = 0     -- ms delay before firing (0 = instant)
+    local _triggerLast  = 0
+
+    ord=ord+1; ToggleRow(com,"Triggerbot","",function() return _triggerOn end,ord,function(s)
+        _triggerOn = s
+        if s then
+            _triggerConn = RunService.Heartbeat:Connect(function()
+                if not _triggerOn or not IsAiming then return end
+                local now = tick()
+                if now - _triggerLast < _triggerDelay/1000 then return end
+                local m = LocalPlayer:GetMouse()
+                if not m.Target or not m.Target.Parent then return end
+                local tp = Players:GetPlayerFromCharacter(m.Target.Parent)
+                if not tp or tp == LocalPlayer then return end
+                if Config.Aimbot.TeamCheck then
+                    local tc=tp.Team; local lc=LocalPlayer.Team
+                    if tc and lc and tc==lc then return end
+                end
+                _triggerLast = now
+                pcall(mouse1press)
+                pcall(mouse1release)
+            end)
+            ShowToast("Triggerbot","Enabled","success")
+        else
+            if _triggerConn then _triggerConn:Disconnect(); _triggerConn=nil end
+            pcall(mouse1release)
+            ShowToast("Triggerbot","Disabled","warn")
+        end
+    end,"Triggerbot")
+    ord=ord+1; SliderRow(com,"Fire Delay (ms)",0,300,0,ord,function(v) _triggerDelay=v end)
 
     local vis=TabPages["Visual"]; ord=0
     ord=ord+1; Section(vis,"ESP",ord)
@@ -1290,6 +1625,9 @@ local function CreateMainMenu()
     ord=ord+1; ToggleRow(vis,"Health Bar","",function() return Config.HealthBar.Enabled end,ord,function(s) Config.HealthBar.Enabled=s end,"HealthBar")
     ord=ord+1; ToggleRow(vis,"Distance","",function() return Config.Distance.Enabled end,ord,function(s) Config.Distance.Enabled=s end,"Distance")
     ord=ord+1; SliderRow(vis,"Max Distance",100,2000,Config.Distance.MaxDistance,ord,function(v) Config.Distance.MaxDistance=v end)
+    ord=ord+1; Section(vis,"Extra Visuals",ord)
+    ord=ord+1; ToggleRow(vis,"Target HUD","Popup when aiming",function() return Config.TargetHUD.Enabled end,ord,function(s) Config.TargetHUD.Enabled=s end,"TargetHUD")
+    ord=ord+1; ToggleRow(vis,"Target Team Check","",function() return Config.TargetHUD.TeamCheck end,ord,function(s) Config.TargetHUD.TeamCheck=s end,"TargetTeamCheck")
 
     local uti=TabPages["Utility"]; ord=0
     ord=ord+1; Section(uti,"Visual FX",ord)
@@ -1323,12 +1661,12 @@ local function CreateMainMenu()
     ord=ord+1; Section(cfg,"Save / Load",ord)
     local _,cfgBox=InputRow(cfg,"Config Name","my_config",ord+1); ord=ord+2
     ord=ord+1; ActionRow(cfg,"Save Config",ord,function(btn)
-        local n=cfgBox.Text=="" and "NovaRecode_Config" or cfgBox.Text
+        local n=cfgBox.Text=="" and "NovaV4_Config" or cfgBox.Text
         local ok2=pcall(function() writefile(n..".json",HttpService:JSONEncode(Config)) end)
         btn.Text=ok2 and "Saved!" or "Save Failed"; task.wait(1); btn.Text="Save Config"
     end)
     ord=ord+1; ActionRow(cfg,"Load Config",ord,function(btn)
-        local n=cfgBox.Text=="" and "NovaRecode_Config" or cfgBox.Text
+        local n=cfgBox.Text=="" and "NovaV4_Config" or cfgBox.Text
         local ok2,data=pcall(function() return readfile(n..".json") end)
         if ok2 and data then
             local ok3,dec=pcall(function() return HttpService:JSONDecode(data) end)
@@ -1365,6 +1703,198 @@ local function CreateMainMenu()
     local tip=New("Frame",{Size=UDim2.new(1,0,0,60),BackgroundColor3=C.Row,LayoutOrder=ord+1,Parent=set})
     New("TextLabel",{Size=UDim2.new(1,-16,1,0),Position=UDim2.new(0,12,0,0),BackgroundTransparency=1,Text="Right-click any toggle to pin to Favorites.\nMiddle-click any toggle to set a keybind.\nKeybinds work even when menu is closed.",TextColor3=C.TextSec,TextSize=11,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,TextWrapped=true,Parent=tip})
 
+    ord=ord+#presets+1; Section(set,"Window Size",ord)
+    local sizeOpts={{"Compact","0,520,0,340"},{"Default","0,580,0,380"},{"Large","0,680,0,440"},{"XL","0,780,0,500"}}
+    for _,sz in ipairs(sizeOpts) do
+        ord=ord+1
+        local srow=New("Frame",{Size=UDim2.new(1,0,0,36),BackgroundColor3=C.Row,LayoutOrder=ord,Parent=set}); Corner(6,srow)
+        New("Frame",{Size=UDim2.new(0,3,0.6,0),Position=UDim2.new(0,0,0.2,0),BackgroundColor3=C.AccentDim,BorderSizePixel=0,Parent=srow}); Corner(2,srow:FindFirstChildOfClass("Frame"))
+        New("TextLabel",{Size=UDim2.new(1,-16,1,0),Position=UDim2.new(0,12,0,0),BackgroundTransparency=1,Text=sz[1],TextColor3=C.TextPri,TextSize=13,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=srow})
+        local sbtn=New("TextButton",{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",Parent=srow})
+        sbtn.MouseEnter:Connect(function() TweenService:Create(srow,TweenInfo.new(0.1),{BackgroundColor3=C.RowHover}):Play() end)
+        sbtn.MouseLeave:Connect(function() TweenService:Create(srow,TweenInfo.new(0.1),{BackgroundColor3=C.Row}):Play() end)
+        sbtn.MouseButton1Click:Connect(function()
+            local parts={}; for n in sz[2]:gmatch("[^,]+") do table.insert(parts,tonumber(n)) end
+            TweenService:Create(Root,TweenInfo.new(0.3,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(parts[1],parts[2],parts[3],parts[4])}):Play()
+            ShowToast("Window Size",sz[1],"success")
+        end)
+    end
+
+    -- ============================================================
+    -- EXPLOITS TAB
+    -- ============================================================
+    local exp=TabPages["Exploits"]; ord=0
+
+    -- State
+    local _speedHackOn = false
+    local _jumpHackOn  = false
+    local _infJumpOn   = false
+    local _antiAFKOn   = false; local _antiAFKConn = nil
+    local _noAnimOn    = false
+    local _customSpeed = 100
+    local _customJump  = 150
+
+    -- Persistent enforcement loop — runs every frame, handles speed + jump + no-anim
+    local _exploitConn = RunService.Stepped:Connect(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum  = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        -- Speed: override every frame so server-side resets can't fight it
+        if _speedHackOn then
+            hum.WalkSpeed = _customSpeed
+        end
+
+        -- Jump Power: UseJumpPower must be true for JumpPower to work in newer Roblox
+        if _jumpHackOn then
+            hum.UseJumpPower = true
+            hum.JumpPower = _customJump
+        end
+
+        -- Infinite Jump: check Space held + currently in air, then force jump state
+        if _infJumpOn then
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space)
+            and hum.FloorMaterial == Enum.Material.Air then
+                hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end
+
+    end)
+    table.insert(Connections, _exploitConn)
+
+    -- No Animations: use AnimatorEnabled to suppress all visual output
+    -- while keeping the Animator object alive so gun scripts still work.
+    local _noAnimConn = nil
+
+    local function ApplyNoAnim(on)
+        local char = LocalPlayer.Character; if not char then return end
+        local hum  = char:FindFirstChildOfClass("Humanoid"); if not hum then return end
+        local animate = char:FindFirstChild("Animate")
+
+        if on then
+            if animate then animate.Disabled = true end
+            -- Try AnimatorEnabled (works on some executors)
+            pcall(function() hum.AnimatorEnabled = false end)
+            -- Kill existing tracks
+            for _, t in ipairs(hum:GetPlayingAnimationTracks()) do
+                pcall(function() t:Stop(0) end)
+            end
+            -- Heartbeat loop: stop every track every frame AND zero their speed
+            _noAnimConn = RunService.Heartbeat:Connect(function()
+                local c = LocalPlayer.Character; if not c then return end
+                local h = c:FindFirstChildOfClass("Humanoid"); if not h then return end
+                for _, t in ipairs(h:GetPlayingAnimationTracks()) do
+                    pcall(function()
+                        t:AdjustSpeed(0)
+                        t:Stop(0)
+                    end)
+                end
+                -- Also hit every Animator descendant (tools parent their Animator here)
+                for _, v in ipairs(c:GetDescendants()) do
+                    if v:IsA("Animator") or v:IsA("AnimationController") then
+                        pcall(function()
+                            for _, t in ipairs(v:GetPlayingAnimationTracks()) do
+                                t:AdjustSpeed(0)
+                                t:Stop(0)
+                            end
+                        end)
+                    end
+                end
+            end)
+        else
+            if _noAnimConn then _noAnimConn:Disconnect(); _noAnimConn = nil end
+            pcall(function() hum.AnimatorEnabled = true end)
+            if animate then animate.Disabled = false end
+            for _, t in ipairs(hum:GetPlayingAnimationTracks()) do
+                pcall(function() t:AdjustSpeed(1) end)
+            end
+        end
+    end
+
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        if _noAnimOn then ApplyNoAnim(true) end
+    end)
+
+    ord=ord+1; Section(exp,"Movement",ord)
+
+    -- Speed Hack
+    ord=ord+1; ToggleRow(exp,"Speed Hack","",function() return _speedHackOn end,ord,function(s)
+        _speedHackOn=s
+        if not s then
+            local hum=LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed=16 end
+        end
+        ShowToast("Speed Hack",s and ("Enabled ("..tostring(_customSpeed)..")") or "Disabled",s and "success" or "warn")
+    end,"SpeedHack")
+    ord=ord+1; SliderRow(exp,"Speed Value",16,500,_customSpeed,ord,function(v) _customSpeed=v end)
+
+    -- Jump Power
+    ord=ord+1; ToggleRow(exp,"Jump Power","",function() return _jumpHackOn end,ord,function(s)
+        _jumpHackOn=s
+        if not s then
+            local hum=LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.UseJumpPower=false; hum.JumpPower=50 end
+        end
+        ShowToast("Jump Power",s and ("Enabled ("..tostring(_customJump)..")") or "Disabled",s and "success" or "warn")
+    end,"JumpHack")
+    ord=ord+1; SliderRow(exp,"Jump Value",50,500,_customJump,ord,function(v) _customJump=v end)
+
+    -- Infinite Jump
+    ord=ord+1; ToggleRow(exp,"Infinite Jump","",function() return _infJumpOn end,ord,function(s)
+        _infJumpOn=s
+        ShowToast("Infinite Jump",s and "Enabled" or "Disabled",s and "success" or "warn")
+    end,"InfJump")
+
+    ord=ord+1; Section(exp,"Player",ord)
+
+    -- Anti-AFK
+    ord=ord+1; ToggleRow(exp,"Anti-AFK","",function() return _antiAFKOn end,ord,function(s)
+        _antiAFKOn=s
+        if s then
+            local vrs=game:GetService("VirtualUser")
+            _antiAFKConn=LocalPlayer.Idled:Connect(function()
+                pcall(function() vrs:CaptureController(); vrs:ClickButton2(Vector2.new()) end)
+            end)
+            ShowToast("Anti-AFK","Enabled","success")
+        else
+            if _antiAFKConn then _antiAFKConn:Disconnect(); _antiAFKConn=nil end
+            ShowToast("Anti-AFK","Disabled","warn")
+        end
+    end,"AntiAFK")
+
+    -- No Animations
+    ord=ord+1; ToggleRow(exp,"No Animations","",function() return _noAnimOn end,ord,function(s)
+        _noAnimOn=s
+        ApplyNoAnim(s)
+        ShowToast("No Animations",s and "Enabled" or "Disabled",s and "success" or "warn")
+    end,"NoAnims")
+
+    ord=ord+1; Section(exp,"Utility",ord)
+
+    ord=ord+1; ActionRow(exp,"Rejoin Server",ord,function(btn)
+        btn.Text="Rejoining..."
+        pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId,LocalPlayer) end)
+    end)
+    ord=ord+1; ActionRow(exp,"Copy Position",ord,function(btn)
+        local hrp=LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local p=hrp.Position
+            local s=("%.2f, %.2f, %.2f"):format(p.X,p.Y,p.Z)
+            pcall(function() setclipboard(s) end)
+            ShowToast("Position Copied",s,"success")
+            btn.Text="Copied!"; task.wait(1); btn.Text="Copy Position"
+        end
+    end)
+    ord=ord+1; ActionRow(exp,"Print Players",ord,function(btn)
+        ShowToast("Players","Check output console","info")
+        for _,p in ipairs(Players:GetPlayers()) do
+            print(("[Nova] %s (@%s)  ID:%d"):format(p.DisplayName,p.Name,p.UserId))
+        end
+    end)
+
+
     SetTab("Combat")
     return Root, AnimateOpen
 end
@@ -1372,7 +1902,7 @@ end
 -- ============================================================
 -- Init
 -- ============================================================
-print("[NovaRecode] Initializing...")
+print("[NovaV4] Initializing...")
 
 local MainMenu, AnimateOpen = CreateMainMenu()
 
@@ -1385,6 +1915,9 @@ task.spawn(function()
 end)
 
 InitAimbot()
+InitJumpCircle()
+InitChinaHat()
+InitTargetHUD()
 CreateWASDDisplay()
 CreateFPSCounter()
 CreatePINGDisplay()
@@ -1402,7 +1935,20 @@ local clickTimes={}
 
 UserInputService.InputBegan:Connect(function(input,gameProcessed)
     UpdateKeyVisual(input.KeyCode,true)
-    if input.UserInputType==Enum.UserInputType.MouseButton2 and not MenuOpen then IsAiming=true end
+    -- Aimbot trigger: default RMB, custom key, or custom mouse button
+    if not MenuOpen then
+        local ut=input.UserInputType
+        if Config.Aimbot.MouseButton then
+            -- custom mouse button (MB3/MB4/MB5)
+            if ut==Config.Aimbot.MouseButton then IsAiming=true end
+        elseif Config.Aimbot.Key then
+            -- custom keyboard key
+            if ut==Enum.UserInputType.Keyboard and input.KeyCode==Config.Aimbot.Key then IsAiming=true end
+        else
+            -- default: RMB
+            if ut==Enum.UserInputType.MouseButton2 then IsAiming=true end
+        end
+    end
     if gameProcessed then return end
     if input.KeyCode==Config.Menu.Keybind or input.KeyCode==Enum.KeyCode.Insert then
         MenuOpen = not MenuOpen
@@ -1417,10 +1963,11 @@ UserInputService.InputBegan:Connect(function(input,gameProcessed)
     if input.UserInputType==Enum.UserInputType.Keyboard then
         for featureKey,kc in pairs(FeatureKeybinds) do
             if input.KeyCode==kc then
-                local fd=FavoritesData[featureKey]
-                if fd and fd.callback then
-                    local newState=not fd.getState(); fd.callback(newState)
-                    ShowToast(fd.label,newState and "Enabled via keybind" or "Disabled via keybind",newState and "success" or "info")
+                local reg=ToggleRegistry[featureKey]
+                if reg and reg.callback then
+                    local newState=not reg.getState()
+                    reg.callback(newState)
+                    ShowToast(reg.label, newState and "Enabled" or "Disabled", newState and "success" or "info")
                 end
             end
         end
@@ -1430,14 +1977,49 @@ end)
 
 UserInputService.InputEnded:Connect(function(input)
     UpdateKeyVisual(input.KeyCode,false)
-    if input.UserInputType==Enum.UserInputType.MouseButton2 then IsAiming=false end
+    local ut=input.UserInputType
+    if Config.Aimbot.MouseButton then
+        if ut==Config.Aimbot.MouseButton then IsAiming=false end
+    elseif Config.Aimbot.Key then
+        if ut==Enum.UserInputType.Keyboard and input.KeyCode==Config.Aimbot.Key then IsAiming=false end
+    else
+        if ut==Enum.UserInputType.MouseButton2 then IsAiming=false end
+    end
 end)
 
 local frameCount,lastFPSUpdate,currentFPS=0,tick(),0
 
 local mainConn=RunService.RenderStepped:Connect(function()
     if ScriptDestroyed then return end
-    if Drawing then UpdateESP(); UpdateAimbot() end
+    if Drawing then
+        UpdateESP()
+        UpdateAimbot()
+        UpdateJumpCircle()
+        UpdateLocalChinaHat()
+    end
+    -- Target HUD: show when mouse hovers close to any player on screen
+    if Config.TargetHUD and Config.TargetHUD.Enabled then
+        local mousePos = UserInputService:GetMouseLocation()
+        local hoverTarget = nil
+        local closestDist = 60
+        for _,player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            -- Team check: skip teammates if enabled
+            if Config.TargetHUD.TeamCheck and player.Team
+            and LocalPlayer.Team and player.Team == LocalPlayer.Team then continue end
+            local char = player.Character; if not char then continue end
+            local hum = char:FindFirstChildOfClass("Humanoid"); if not hum or hum.Health<=0 then continue end
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart")
+            if not part then continue end
+            local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if not onScreen then continue end
+            local dist = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+            if dist < closestDist then closestDist=dist; hoverTarget=player end
+        end
+        if hoverTarget then ShowTargetHUD(hoverTarget) else HideTargetHUD() end
+    else
+        HideTargetHUD()
+    end
     if MenuOpen then pcall(function() UserInputService.MouseBehavior=Enum.MouseBehavior.Default end) end
     frameCount=frameCount+1
     local now=tick()
@@ -1459,6 +2041,10 @@ local mainConn=RunService.RenderStepped:Connect(function()
         HUDElements.CPS.Text="CPS: "..cps
     end
 end)
+table.insert(Connections,mainConn)
+
+print("[NovaV4] Ready. Press LEFT SHIFT or INSERT to toggle menu.")
+print("[NovaV4] Right-click any toggle to pin. Middle-click to bind a key.")
 table.insert(Connections,mainConn)
 
 print("[NovaRecode] Ready. Press LEFT SHIFT or INSERT to toggle menu.")
